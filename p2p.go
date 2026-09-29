@@ -31,26 +31,38 @@ type piece_progress struct {
 	backlog    int
 }
 
+// fill_requests keeps up to max_backlog block requests outstanding.
 func (pp *piece_progress) fill_requests(c *client, piece_length int) error {
 	for pp.backlog < max_backlog && pp.requested < piece_length {
 		block_len := block_size
-		if piece_length-pp.requested < block_size {
-			block_len = piece_length - pp.requested
+
+		remaining := piece_length - pp.requested
+		if remaining < block_size {
+			block_len = remaining
 		}
-		if err := c.send_request(pp.index, pp.requested, block_len); err != nil {
+
+		if err := c.send_request(
+			pp.index,
+			pp.requested,
+			block_len,
+		); err != nil {
 			return err
 		}
+
 		pp.backlog++
 		pp.requested += block_len
 	}
+
 	return nil
 }
 
+// handle_message processes messages received from the peer.
 func (pp *piece_progress) handle_message(c *client) error {
 	msg, err := c.read()
 	if err != nil {
 		return err
 	}
+
 	if msg == nil {
 		return nil
 	}
@@ -59,14 +71,17 @@ func (pp *piece_progress) handle_message(c *client) error {
 
 	case msg_unchoke:
 		c.choked = false
-		log.Printf("unchoked by peer\n")
+		log.Printf("unchoked by peer")
 
 	case msg_choke:
 		c.choked = true
+
+		// Outstanding requests are no longer useful.
 		pp.requested = pp.downloaded
 		pp.backlog = 0
 
 	case msg_bitfield:
+		// A peer can send a bitfield after the handshake.
 		c.bitfield = msg.payload
 
 	case msg_have:
@@ -74,35 +89,48 @@ func (pp *piece_progress) handle_message(c *client) error {
 		if err != nil {
 			return err
 		}
+
 		c.bitfield.set_piece(index)
 
 	case msg_piece:
-		n, err := parse_piece(pp.index, pp.buf, msg)
+		n, err := parse_piece(
+			pp.index,
+			pp.buf,
+			msg,
+		)
 		if err != nil {
 			return err
 		}
+
 		pp.downloaded += n
-		pp.backlog--
+
+		if pp.backlog > 0 {
+			pp.backlog--
+		}
 	}
 
 	return nil
 }
 
+// download_piece downloads one complete torrent piece.
 func download_piece(c *client, pw *piece_work) ([]byte, error) {
 	pp := &piece_progress{
 		index: pw.index,
 		buf:   make([]byte, pw.length),
 	}
 
+	// Prevent a dead peer from blocking forever.
 	c.conn.SetDeadline(time.Now().Add(30 * time.Second))
 	defer c.conn.SetDeadline(time.Time{})
 
 	for pp.downloaded < pw.length {
+
 		if !c.choked {
 			if err := pp.fill_requests(c, pw.length); err != nil {
 				return nil, err
 			}
 		}
+
 		if err := pp.handle_message(c); err != nil {
 			return nil, err
 		}
@@ -111,127 +139,308 @@ func download_piece(c *client, pw *piece_work) ([]byte, error) {
 	return pp.buf, nil
 }
 
+// check_integrity verifies the SHA-1 hash of a downloaded piece.
 func check_integrity(pw *piece_work, data []byte) error {
 	hash := sha1.Sum(data)
+
 	if !bytes.Equal(hash[:], pw.hash[:]) {
-		return fmt.Errorf("piece %d failed integrity check", pw.index)
+		return fmt.Errorf(
+			"piece %d failed integrity check",
+			pw.index,
+		)
 	}
+
 	return nil
 }
 
-func start_download_worker(p peer, info_hash [20]byte, peer_id [20]byte, num_pieces int, work_ch chan *piece_work, results_ch chan *piece_result) {
-	c, err := new_client(p, info_hash, peer_id, num_pieces)
+// start_download_worker handles downloading pieces from one peer.
+func start_download_worker(
+	p peer,
+	info_hash [20]byte,
+	peer_id [20]byte,
+	num_pieces int,
+	work_ch chan *piece_work,
+	results_ch chan *piece_result,
+) {
+	c, err := new_client(
+		p,
+		info_hash,
+		peer_id,
+		num_pieces,
+	)
+
 	if err != nil {
-		log.Printf("could not connect to peer %s: %v\n", p, err)
+		log.Printf(
+			"could not connect to peer %s: %v",
+			p,
+			err,
+		)
 		return
 	}
+
 	defer c.conn.Close()
 
-	log.Printf("connected to peer %s\n", p)
+	log.Printf("connected to peer %s", p)
 
 	if err := c.send_unchoke(); err != nil {
 		return
 	}
+
 	if err := c.send_interested(); err != nil {
 		return
 	}
-	log.Printf("sent interested to %s, choked=%v\n", p, c.choked)
 
+	log.Printf(
+		"sent interested to %s, choked=%v",
+		p,
+		c.choked,
+	)
+
+	// Prevent a worker from endlessly cycling through
+	// pieces that this particular peer does not have.
 	misses := 0
+
 	for pw := range work_ch {
+
+		// Check whether this peer owns the piece.
 		if !c.bitfield.has_piece(pw.index) {
 			work_ch <- pw
-			if misses++; misses > 100 {
+
+			misses++
+
+			if misses > 100 {
+				log.Printf(
+					"peer %s has too few requested pieces; leaving",
+					p,
+				)
 				return
 			}
+
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
+
 		misses = 0
 
 		data, err := download_piece(c, pw)
 		if err != nil {
 			work_ch <- pw
-			log.Printf("failed to download piece %d from %s: %v\n", pw.index, p, err)
+
+			log.Printf(
+				"failed to download piece %d from %s: %v",
+				pw.index,
+				p,
+				err,
+			)
+
 			return
 		}
 
+		// Verify the piece before giving it to the downloader.
 		if err := check_integrity(pw, data); err != nil {
 			work_ch <- pw
-			log.Printf("piece %d from %s failed integrity check\n", pw.index, p)
+
+			log.Printf(
+				"piece %d from %s failed integrity check",
+				pw.index,
+				p,
+			)
+
 			continue
 		}
 
-		results_ch <- &piece_result{pw.index, data}
+		results_ch <- &piece_result{
+			index: pw.index,
+			data:  data,
+		}
 	}
 }
 
+// printProgress displays the current download progress.
+func printProgress(done, total int, peers int32) {
+	if total == 0 {
+		return
+	}
+
+	percent := float64(done) / float64(total) * 100
+
+	barWidth := 30
+	filled := int(percent / 100 * float64(barWidth))
+
+	if filled > barWidth {
+		filled = barWidth
+	}
+
+	bar := ""
+
+	for i := 0; i < barWidth; i++ {
+		if i < filled {
+			bar += "█"
+		} else {
+			bar += "░"
+		}
+	}
+
+	fmt.Printf(
+		"\rDownloading: [%s] %6.2f%% | %d/%d pieces | %d peers",
+		bar,
+		percent,
+		done,
+		total,
+		peers,
+	)
+
+	if done == total {
+		fmt.Println()
+	}
+}
+
+// download downloads the complete torrent.
 func (t *torrent_file) download() ([]byte, error) {
 	log.Println("starting download for", t.name)
 
-	peer_id, err := new_peer_id()
+	peerID, err := new_peer_id()
 	if err != nil {
 		return nil, err
 	}
 
-	peers, err := t.request_peers(peer_id, 6881)
+	// Ask the tracker for peers.
+	peers, err := t.request_peers(peerID, 6881)
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("got %d peers from tracker\n", len(peers))
+
+	log.Printf(
+		"got %d peers from tracker",
+		len(peers),
+	)
+
 	if len(peers) == 0 {
-		return nil, fmt.Errorf("tracker returned no peers")
+		return nil, fmt.Errorf(
+			"tracker returned no peers",
+		)
 	}
 
-	work_ch := make(chan *piece_work, len(t.piece_hashes))
-	results_ch := make(chan *piece_result)
+	// Work queue containing every piece.
+	workCh := make(chan *piece_work, len(t.piece_hashes))
 
+	// Results from workers.
+	resultsCh := make(chan *piece_result)
+
+	// Add all pieces to the work queue.
 	for index, hash := range t.piece_hashes {
 		length := t.piece_length_at(index)
-		work_ch <- &piece_work{index, hash, length}
+
+		workCh <- &piece_work{
+			index:  index,
+			hash:   hash,
+			length: length,
+		}
 	}
 
+	// Number of workers still running.
 	alive := int32(len(peers))
+
+	// Closed when every worker has exited.
 	dead := make(chan struct{})
+
+	// Start one worker per peer.
 	for _, p := range peers {
 		go func(p peer) {
+
 			defer func() {
 				if atomic.AddInt32(&alive, -1) == 0 {
 					close(dead)
 				}
 			}()
-			start_download_worker(p, t.info_hash, peer_id, len(t.piece_hashes), work_ch, results_ch)
+
+			start_download_worker(
+				p,
+				t.info_hash,
+				peerID,
+				len(t.piece_hashes),
+				workCh,
+				resultsCh,
+			)
+
 		}(p)
 	}
 
+	// Allocate the complete output file.
 	buf := make([]byte, t.length)
-	done_pieces := 0
 
-	for done_pieces < len(t.piece_hashes) {
-		var result *piece_result
+	donePieces := 0
+	totalPieces := len(t.piece_hashes)
+
+	for donePieces < totalPieces {
+
 		select {
-		case result = <-results_ch:
+
+		// A worker successfully downloaded a piece.
+		case result := <-resultsCh:
+
+			if result == nil {
+				continue
+			}
+
+			begin := result.index * t.piece_length
+			end := begin + len(result.data)
+
+			// Safety check for the piece index.
+			if begin < 0 || begin >= len(buf) {
+				return nil, fmt.Errorf(
+					"invalid piece index %d",
+					result.index,
+				)
+			}
+
+			if end > len(buf) {
+				end = len(buf)
+			}
+
+			// Copy the piece into its correct position.
+			copy(
+				buf[begin:end],
+				result.data,
+			)
+
+			donePieces++
+
+			printProgress(
+				donePieces,
+				totalPieces,
+				atomic.LoadInt32(&alive),
+			)
+
+		// Every peer has failed or exited.
 		case <-dead:
-			return nil, fmt.Errorf("all peers exhausted at %d/%d pieces", done_pieces, len(t.piece_hashes))
+
+			return nil, fmt.Errorf(
+				"all peers exhausted at %d/%d pieces",
+				donePieces,
+				totalPieces,
+			)
 		}
-
-		begin := result.index * t.piece_length
-		end := begin + len(result.data)
-		copy(buf[begin:end], result.data)
-		done_pieces++
-
-		percent := float64(done_pieces) / float64(len(t.piece_hashes)) * 100
-		log.Printf("%.2f%% done — piece %d downloaded, %d peers active\n", percent, result.index, atomic.LoadInt32(&alive))
 	}
+
+	log.Printf(
+		"download complete: %d/%d pieces",
+		donePieces,
+		totalPieces,
+	)
 
 	return buf, nil
 }
 
+// piece_length_at returns the actual size of a piece.
+// The final piece can be smaller than piece_length.
 func (t *torrent_file) piece_length_at(index int) int {
 	begin := index * t.piece_length
 	end := begin + t.piece_length
+
 	if end > t.length {
 		end = t.length
 	}
+
 	return end - begin
 }
