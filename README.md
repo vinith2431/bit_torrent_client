@@ -8,7 +8,9 @@ A lightweight BitTorrent client written in Go. This project implements the core 
 * Extract torrent metadata
 * Calculate the torrent info hash
 * Split and process piece hashes
-* Communicate with HTTP trackers
+* Communicate with HTTP and UDP trackers, including `announce-list`
+* Discover peers on the local network (Local Service Discovery)
+* Score peers by RTT, speed and reliability, and replace failed peers automatically
 * Discover peers from tracker responses
 * Support compact and dictionary-style peer responses
 * Establish TCP connections with peers
@@ -290,6 +292,63 @@ The bitfield is sized according to the total number of pieces in the torrent rat
 
 Piece indexes received from peers are checked before modifying the bitfield to prevent invalid indexes from causing runtime panics.
 
+## Peer Discovery and Peer Management
+
+Peers come from several sources, all merged into one peer table:
+
+```text
+   HTTP trackers      UDP trackers (BEP 15)      Local Service Discovery (BEP 14)
+         │                    │                               │
+         └────────────────────┼───────────────────────────────┘
+                              ▼
+                        Peer Manager
+              (de-duplicate, measure, score, back off)
+                              │
+                              ▼
+                 Best peers → download workers
+```
+
+* `discovery.go`
+  * Reads every tracker in `announce` and `announce-list` (BEP 12).
+  * Announces to HTTP and `udp://` trackers and re-announces on each tracker's `interval`.
+  * UDP tracker protocol: `connect` then `announce`, with retries and transaction-id checks.
+  * Local Service Discovery: multicast `BT-SEARCH` announcements on `239.192.152.143:6771`, sent on every network interface, to find peers on the same LAN.
+* `peer_manager.go`
+  * Peer table keyed by `ip:port`, so duplicates from different sources are merged.
+  * Measures **RTT** (TCP connect time), **download speed** (verified bytes / time) and **reliability** (successful pieces / attempts).
+  * **Score** from 0 to 100: `50% speed + 20% RTT + 30% reliability`. Untested peers start at 50, so new peers are tried before peers that failed.
+  * Unreachable or failing peers back off (30 s, 60 s, 90 s … up to 10 min). Peers that send 3 corrupt pieces are banned.
+  * Up to 30 peers are downloaded from at once. When one fails, its slot goes to the next best peer automatically.
+
+Every 15 seconds the client logs the peer table:
+
+```text
+Peer                        RTT       Speed  Reliability  Score  State    Source
+------------------------------------------------------------------------------------------
+127.0.0.1:61137            1 ms   68.2 MB/s         100%    100  active   udp:127.0.0.1
+127.0.0.1:61138            1 ms           -           0%     20  banned   udp:127.0.0.1
+127.0.0.1:61139               -           -           0%      0  backoff  udp:127.0.0.1
+```
+
+The download stops with an error if no piece arrives for 2 minutes.
+
+## Tests
+
+```bash
+go test ./...
+```
+
+* Unit tests for the peer table, scoring, back-off and banning.
+* A fake UDP tracker that checks the exact BEP 15 byte layout.
+* LSD message parsing, plus two LSD instances discovering each other (skipped if multicast is blocked).
+* An end-to-end download through a fake UDP tracker, a good seeder, a seeder that corrupts data, and a dead peer.
+
+To test against real trackers (needs a network that allows torrent traffic):
+
+```bash
+LIVE_TORRENT=some.torrent go test -run TestLiveDiscovery -v
+```
+
 ## Running the Client
 
 Make sure Go is installed.
@@ -345,13 +404,10 @@ This implementation is primarily designed for learning and experimentation with 
 Current limitations include:
 
 * Primarily focused on single-file torrents
-* HTTP tracker support
-* UDP trackers are not currently handled
 * Multi-file torrents are not currently supported
-* Peer availability depends on the peers returned by the tracker
-* More advanced peer management can be added
-* Tracker re-announcing can be improved
-* Robust recovery when all available peers fail can be improved
+* Download only: the client does not upload or accept incoming connections
+* No DHT or peer exchange (PEX) yet
+* Pieces are still requested in queue order, not rarest-first
 
 ## Technologies Used
 
