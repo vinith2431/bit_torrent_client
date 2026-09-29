@@ -43,7 +43,7 @@ func new_client(p peer, info_hash [20]byte, peer_id [20]byte, num_pieces int, mo
 		peer:      p,
 		info_hash: info_hash,
 		peer_id:   peer_id,
-		transport: transport_tcp,
+		transport: mode,
 		bitfield:  bf,
 		choked:    choked,
 		rtt:       rtt,

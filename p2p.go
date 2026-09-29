@@ -559,6 +559,9 @@ func (t *torrent_file) fill_peer_slots(
 }
 
 func (t *torrent_file) download() ([]byte, error) {
+	downloadStart := time.Now()
+	bytesDownloaded := int64(0)
+
 	log.Println("starting download for", t.name)
 	log.Printf("%d trackers: %v", len(t.trackers), t.trackers)
 
@@ -748,6 +751,7 @@ func (t *torrent_file) download() ([]byte, error) {
 			complete[result.index] = true
 			scheduler.set_complete(result.index)
 			donePieces++
+			bytesDownloaded += int64(len(result.data))
 
 			if err := save_resume_state(
 				t,
@@ -775,10 +779,24 @@ func (t *torrent_file) download() ([]byte, error) {
 					float64(len(t.piece_hashes)) *
 					100
 
+			elapsed := time.Since(downloadStart)
+			speed := float64(bytesDownloaded) / elapsed.Seconds()
+
+			remainingBytes := int64(t.length) - bytesDownloaded
+
+			eta := time.Duration(0)
+			if speed > 0 {
+				eta = time.Duration(
+					float64(remainingBytes) / speed * float64(time.Second),
+				)
+			}
+
 			log.Printf(
-				"%.2f%% done — piece %d saved — %d/%d peers active",
+				"%.2f%% done — piece %d saved — %.2f MB/s — ETA %s — %d/%d peers active",
 				percent,
 				result.index,
+				speed/(1024*1024),
+				format_duration(eta),
 				active,
 				known,
 			)
@@ -802,7 +820,17 @@ func (t *torrent_file) download() ([]byte, error) {
 		}
 	}
 
+	totalElapsed := time.Since(downloadStart)
+	averageSpeed := float64(bytesDownloaded) / totalElapsed.Seconds()
+
 	log.Println("all pieces downloaded successfully")
+
+	log.Printf(
+		"download summary: %.2f MB in %s (average %.2f MB/s)",
+		float64(bytesDownloaded)/(1024*1024),
+		format_duration(totalElapsed),
+		averageSpeed/(1024*1024),
+	)
 
 	log.Printf(
 		"final peer table:\n%s",

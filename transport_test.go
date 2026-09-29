@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"testing"
 )
 
@@ -10,18 +11,33 @@ func TestTransportModes(t *testing.T) {
 	}
 }
 
-func TestUTPNotImplemented(t *testing.T) {
+func TestDialWithFallback_FallbackToTCP(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on TCP: %v", err)
+	}
+	defer l.Close()
+
+	tcpAddr := l.Addr().(*net.TCPAddr)
 	p := peer{
-		ip:   []byte{127, 0, 0, 1},
-		port: 1,
+		ip:   tcpAddr.IP.To4(),
+		port: uint16(tcpAddr.Port),
 	}
 
-	conn, err := dial_peer(p, transport_utp)
-
-	if err == nil {
-		if conn != nil {
-			conn.Close()
+	go func() {
+		c, err := l.Accept()
+		if err == nil {
+			c.Close()
 		}
-		t.Fatal("expected uTP to report not implemented")
+	}()
+
+	conn, mode, err := dial_with_fallback(p)
+	if err != nil {
+		t.Fatalf("dial_with_fallback failed: %v", err)
+	}
+	defer conn.Close()
+
+	if mode != transport_tcp {
+		t.Fatalf("expected mode transport_tcp, got %v", mode)
 	}
 }

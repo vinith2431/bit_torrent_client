@@ -17,8 +17,22 @@ func dial_peer(p peer, mode transport_mode) (peer_conn, error) {
 	case transport_tcp:
 		return net.DialTimeout("tcp", p.String(), 10*time.Second)
 	case transport_utp:
-		return nil, net.UnknownNetworkError("uTP transport not implemented")
+		return dialUTP(p)
 	default:
 		return nil, net.UnknownNetworkError("unsupported transport")
 	}
+}
+
+func dial_with_fallback(p peer) (peer_conn, transport_mode, error) {
+	conn, err := dial_peer(p, transport_utp)
+	if err == nil {
+		return conn, transport_utp, nil
+	}
+
+	conn, err = dial_peer(p, transport_tcp)
+	if err == nil {
+		return conn, transport_tcp, nil
+	}
+
+	return nil, transport_tcp, err
 }
