@@ -42,7 +42,7 @@ func new_client(p peer, info_hash [20]byte, peer_id [20]byte, num_pieces int) (*
 	}, nil
 }
 
-func do_handshake(conn net.Conn, info_hash [20]byte, peer_id [20]byte) error {
+func do_handshake(conn peer_conn, info_hash [20]byte, peer_id [20]byte) error {
 	conn.SetDeadline(time.Now().Add(3 * time.Second))
 	defer conn.SetDeadline(time.Time{})
 
@@ -63,7 +63,7 @@ func do_handshake(conn net.Conn, info_hash [20]byte, peer_id [20]byte) error {
 	return nil
 }
 
-func recv_bitfield(conn net.Conn, num_pieces int) (bitfield, bool, error) {
+func recv_bitfield(conn peer_conn, num_pieces int) (bitfield, bool, error) {
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
 	defer conn.SetDeadline(time.Time{})
 

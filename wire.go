@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"net"
 )
 
 type bitfield []byte
@@ -55,7 +54,7 @@ func (h *handshake) serialize() []byte {
 	return buf
 }
 
-func read_handshake(conn net.Conn) (*handshake, error) {
+func read_handshake(conn peer_conn) (*handshake, error) {
 	len_buf := make([]byte, 1)
 	if _, err := io.ReadFull(conn, len_buf); err != nil {
 		return nil, err
@@ -114,7 +113,7 @@ func (m *message) serialize() []byte {
 	return buf
 }
 
-func read_message(conn net.Conn) (*message, error) {
+func read_message(conn peer_conn) (*message, error) {
 	len_buf := make([]byte, 4)
 	if _, err := io.ReadFull(conn, len_buf); err != nil {
 		return nil, err
