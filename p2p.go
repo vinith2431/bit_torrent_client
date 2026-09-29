@@ -208,7 +208,7 @@ func start_download_worker(
 
 			misses++
 
-			if misses > 100 {
+			if misses > num_pieces {
 				log.Printf(
 					"peer %s has too few requested pieces; leaving",
 					p,

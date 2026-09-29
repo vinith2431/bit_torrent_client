@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"time"
 )
@@ -69,23 +70,50 @@ func recv_bitfield(conn peer_conn, num_pieces int) (bitfield, bool, error) {
 
 	bf := make(bitfield, (num_pieces+7)/8)
 	choked := true
+
 	for {
 		msg, err := read_message(conn)
 		if err != nil {
-			return bf, choked, nil
+			return bf, choked, err
 		}
+
 		if msg == nil {
 			continue
 		}
+
 		switch msg.id {
 		case msg_bitfield:
-			return bitfield(msg.payload), choked, nil
+			bf = bitfield(msg.payload)
+
+			log.Printf(
+				"received bitfield: %d bytes for %d pieces",
+				len(bf),
+				num_pieces,
+			)
+
+			count := 0
+			for i := 0; i < num_pieces; i++ {
+				if bf.has_piece(i) {
+					count++
+				}
+			}
+
+			log.Printf(
+				"peer has %d/%d pieces",
+				count,
+				num_pieces,
+			)
+
+			return bf, choked, nil
+
 		case msg_have:
 			if i, err := parse_have(msg); err == nil {
 				bf.set_piece(i)
 			}
+
 		case msg_unchoke:
 			choked = false
+
 		case msg_choke:
 			choked = true
 		}
