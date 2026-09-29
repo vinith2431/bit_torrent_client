@@ -26,12 +26,13 @@ type bencode_info struct {
 }
 
 type bencode_torrent struct {
-	Announce string       `bencode:"announce"`
-	Info     bencode_info `bencode:"info"`
+	Announce     string       `bencode:"announce"`
+	AnnounceList [][]string   `bencode:"announce-list"`
+	Info         bencode_info `bencode:"info"`
 }
 
 type torrent_file struct {
-	announce     string
+	trackers     []string
 	info_hash    [20]byte
 	piece_hashes [][20]byte
 	piece_length int
@@ -62,8 +63,9 @@ func (b *bencode_torrent) to_torrent_file(info_hash [20]byte) (torrent_file, err
 	if b.Info.Length == 0 {
 		return torrent_file{}, fmt.Errorf("multi-file torrents not supported")
 	}
-	if !strings.HasPrefix(b.Announce, "http") {
-		return torrent_file{}, fmt.Errorf("unsupported tracker %q (need http/https)", b.Announce)
+	trackers := collect_trackers(b.Announce, b.AnnounceList)
+	if len(trackers) == 0 {
+		return torrent_file{}, fmt.Errorf("no supported trackers (need http, https or udp)")
 	}
 
 	piece_hashes, err := b.Info.split_piece_hashes()
@@ -72,13 +74,37 @@ func (b *bencode_torrent) to_torrent_file(info_hash [20]byte) (torrent_file, err
 	}
 
 	return torrent_file{
-		announce:     b.Announce,
+		trackers:     trackers,
 		info_hash:    info_hash,
 		piece_hashes: piece_hashes,
 		piece_length: b.Info.PieceLength,
 		length:       b.Info.Length,
 		name:         b.Info.Name,
 	}, nil
+}
+
+// collect_trackers merges announce and announce-list (BEP 12) into one
+// de-duplicated list, keeping only trackers we can talk to.
+func collect_trackers(announce string, announce_list [][]string) []string {
+	seen := map[string]bool{}
+	var trackers []string
+	add := func(t string) {
+		t = strings.TrimSpace(t)
+		if seen[t] {
+			return
+		}
+		if strings.HasPrefix(t, "http://") || strings.HasPrefix(t, "https://") || strings.HasPrefix(t, "udp://") {
+			seen[t] = true
+			trackers = append(trackers, t)
+		}
+	}
+	add(announce)
+	for _, tier := range announce_list {
+		for _, t := range tier {
+			add(t)
+		}
+	}
+	return trackers
 }
 
 func skip_value(data []byte, i int) (int, error) {
@@ -187,10 +213,12 @@ func (p peer) String() string {
 	return net.JoinHostPort(p.ip.String(), strconv.Itoa(int(p.port)))
 }
 
-func (t *torrent_file) request_peers(peer_id [20]byte, port uint16) ([]peer, error) {
-	base, err := url.Parse(t.announce)
+// request_peers_http announces to an HTTP(S) tracker and returns its peers
+// and how long to wait before announcing again.
+func (t *torrent_file) request_peers_http(tracker string, peer_id [20]byte, port uint16) ([]peer, time.Duration, error) {
+	base, err := url.Parse(tracker)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	params := url.Values{
@@ -210,22 +238,27 @@ func (t *torrent_file) request_peers(peer_id [20]byte, port uint16) ([]peer, err
 
 	response, err := http_client.Get(base.String())
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer response.Body.Close()
 
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	// Check for tracker failure reason first.
-	var failure_resp struct {
+	// Check for tracker failure reason first, and pick up the re-announce interval.
+	var meta_resp struct {
 		FailureReason string `bencode:"failure reason"`
+		Interval      int    `bencode:"interval"`
 	}
-	if err := bencode.Unmarshal(bytes.NewReader(body), &failure_resp); err == nil {
-		if failure_resp.FailureReason != "" {
-			return nil, fmt.Errorf("tracker error: %s", failure_resp.FailureReason)
+	interval := default_announce_interval
+	if err := bencode.Unmarshal(bytes.NewReader(body), &meta_resp); err == nil {
+		if meta_resp.FailureReason != "" {
+			return nil, 0, fmt.Errorf("tracker error: %s", meta_resp.FailureReason)
+		}
+		if meta_resp.Interval > 0 {
+			interval = time.Duration(meta_resp.Interval) * time.Second
 		}
 	}
 
@@ -236,7 +269,8 @@ func (t *torrent_file) request_peers(peer_id [20]byte, port uint16) ([]peer, err
 
 	if err := bencode.Unmarshal(bytes.NewReader(body), &compact_resp); err == nil {
 		if len(compact_resp.Peers) > 0 {
-			return unmarshal_peers([]byte(compact_resp.Peers))
+			peers, err := unmarshal_peers([]byte(compact_resp.Peers))
+			return peers, interval, err
 		}
 	}
 
@@ -249,7 +283,7 @@ func (t *torrent_file) request_peers(peer_id [20]byte, port uint16) ([]peer, err
 	}
 
 	if err := bencode.Unmarshal(bytes.NewReader(body), &list_resp); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	peers := make([]peer, 0, len(list_resp.Peers))
@@ -266,7 +300,7 @@ func (t *torrent_file) request_peers(peer_id [20]byte, port uint16) ([]peer, err
 		})
 	}
 
-	return peers, nil
+	return peers, interval, nil
 }
 
 func new_peer_id() ([20]byte, error) {
