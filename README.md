@@ -1,444 +1,202 @@
 # BitTorrent Client in Go
 
-A lightweight BitTorrent client written in Go. This project implements the core parts of the BitTorrent protocol, including torrent parsing, tracker communication, peer discovery, peer handshakes, bitfield processing, piece downloading, and SHA-1 integrity verification.
+A modular, high-performance BitTorrent client written in Go featuring dual-transport support (**TCP** and **μTP / Micro Transport Protocol** over UDP), multi-tracker discovery (HTTP, UDP BEP 15, and Local Service Discovery BEP 14), intelligent peer scoring, download resume support, adaptive retransmission timeouts, and congestion/flow control.
+
+---
+
+## Architecture Overview
+
+```text
+                     .torrent File / Magnet
+                                │
+                                ▼
+                       Bencode & Metadata
+                                │
+                                ▼
+              Tracker Discovery & LSD Multicast
+              (HTTP, UDP BEP 15, LSD BEP 14)
+                                │
+                                ▼
+                           Peer Manager
+             (Deduplicate, Score, Backoff, Ban)
+                                │
+                                ▼
+                  dial_with_fallback(peer)
+                                │
+             ┌──────────────────┴──────────────────┐
+             ▼                                     ▼
+      TCP Transport                          μTP Transport
+      (net.DialTimeout)                     (UDP / BEP 29)
+             │                                     │
+             └──────────────────┬──────────────────┘
+                                │
+                                ▼
+                       peer_conn Interface
+                                │
+                                ▼
+                     BitTorrent Wire Protocol
+                (Handshake, Bitfield, Messages)
+                                │
+                                ▼
+                         Piece Scheduler
+                  (Availability, Request Queue)
+                                │
+                                ▼
+                       SHA-1 Verification
+                                │
+                                ▼
+                   Disk Storage & Resume State
+```
+
+The BitTorrent protocol layer operates strictly against the `peer_conn` interface, completely unaware of whether the underlying link is TCP or μTP.
+
+---
 
 ## Features
 
-* Parse `.torrent` files using Bencode
-* Extract torrent metadata
-* Calculate the torrent info hash
-* Split and process piece hashes
-* Communicate with HTTP and UDP trackers, including `announce-list`
-* Discover peers on the local network (Local Service Discovery)
-* Score peers by RTT, speed and reliability, and replace failed peers automatically
-* Discover peers from tracker responses
-* Support compact and dictionary-style peer responses
-* Establish TCP connections with peers
-* Perform the BitTorrent handshake
-* Receive and process peer bitfields
-* Handle `have`, `choke`, `unchoke`, and `piece` messages
-* Request file pieces from peers
-* Download pieces concurrently using goroutines
-* Verify downloaded pieces using SHA-1
-* Assemble verified pieces into the output file
-* Debug logging for torrent, tracker, peer, and piece operations
+### 1. Dual Transport Layer
+* **TCP Transport**: Standard TCP socket connections with timeout handling.
+* **μTP (Micro Transport Protocol / BEP 29)**: Complete user-space reliable transport protocol over UDP:
+  * 16-bit sequence numbers with modular wraparound math.
+  * In-order packet delivery and out-of-order reassembly buffer.
+  * Retransmission timer loop with configurable retry limits.
+  * **Adaptive RTO** via Jacobson's algorithm (calculating Smoothed RTT and RTT Variation) with Karn's algorithm protecting against retransmission sample bias.
+  * **Flow Control** with dynamic receiver buffer advertising and sender throttling.
+  * **Congestion Control** with Slow Start (exponential window growth) and Congestion Avoidance (Additive Increase / Multiplicative Decrease upon loss).
+  * **Graceful Shutdown** via `ST_FIN` and abnormal termination via `ST_RESET`.
+  * **Automatic Fallback**: Attempts μTP first and gracefully degrades to TCP if the peer does not support μTP.
 
-## How BitTorrent Downloading Works
+### 2. Peer Discovery
+* **HTTP Trackers**: Standard HTTP GET announce with compact and binary dictionary response parsing.
+* **UDP Trackers (BEP 15)**: Binary connection handshake, transaction ID verification, and announce scraping.
+* **Announce Lists (BEP 12)**: Tiered multi-tracker failover.
+* **Local Service Discovery (BEP 14)**: Multicast `BT-SEARCH` discovery on `239.192.152.143:6771` across all active network interfaces.
 
-The client follows this general workflow:
+### 3. Peer Management & Scoring
+* **Peer Table**: Unifies peers from all discovery sources without duplicate dials.
+* **Adaptive Scoring**: Weighted scoring (`50% speed + 20% RTT + 30% reliability`).
+* **Failure Handling**: Exponential backoff (30s, 60s, 90s up to 10m) and automatic banning after 3 corrupt piece deliveries.
 
-```text
-              .torrent file
-                    |
-                    v
-            Parse torrent metadata
-                    |
-                    v
-              Calculate info hash
-                    |
-                    v
-             Contact tracker
-                    |
-                    v
-              Receive peers
-                    |
-                    v
-            Connect to a peer
-                    |
-                    v
-          BitTorrent handshake
-                    |
-                    v
-              Receive bitfield
-                    |
-                    v
-          Check piece availability
-                    |
-                    v
-            Send interested
-                    |
-                    v
-              Get unchoked
-                    |
-                    v
-            Request pieces
-                    |
-                    v
-             Receive blocks
-                    |
-                    v
-             SHA-1 verification
-                    |
-                    v
-              Write output file
-```
+### 4. Integrity, Download Resumption & Verification
+* **SHA-1 Piece Hashing**: Rigorous piece validation preventing bad blocks from reaching disk.
+* **Resume Support**: Generates `.resume` state and verifies existing `.part` blocks upon startup to avoid redownloading verified pieces.
 
-## Project Structure
+---
+
+## μTP State Machine & Packet Format
+
+### State Machine
 
 ```text
-torrent-client/
-│
-├── main.go
-├── torrent.go
-├── p2p.go
-├── message.go
-├── handshake.go
-├── piece.go
-├── debug.go
-│
-├── go.mod
-├── go.sum
-├── test.torrent
-└── README.md
+              ┌───────────────┐
+              │     CLOSED    │
+              └───────┬───────┘
+                      │ dial (sends ST_SYN)
+                      ▼
+              ┌───────────────┐
+              │   SYN_SENT    │
+              └───────┬───────┘
+                      │ receives ST_STATE
+                      ▼
+              ┌───────────────┐
+              │  ESTABLISHED  │
+              └───────┬───────┘
+                      │
+          ┌───────────┴───────────┐
+          │                       │
+     sends/recvs DATA         sends ST_FIN
+          │                       │
+          ▼                       ▼
+      TRANSFER                 CLOSING
+                                  │
+                                  ▼
+                               CLOSED
 ```
 
-The exact filenames may vary depending on the current implementation.
+### Packet Handling Summary
 
-### Torrent Parsing
+| Event | Action Taken |
+|---|---|
+| **SYN Lost** | Handshake read deadline expires; client drops connection or triggers TCP fallback. |
+| **STATE Lost** | Retransmission loop re-sends unacknowledged packet. |
+| **DATA Lost** | RTO expires; `checkRetransmit()` sends packet again, decreases `cwnd` (loss signal). |
+| **ACK Lost** | Sender RTO expires and retransmits; cumulative ACK handles subsequent packets. |
+| **Duplicate DATA** | Detected via serial difference; receiver generates ACK and discards payload. |
+| **Out-of-Order DATA** | Buffered in `recvBuffer`; ACK is returned; flushed once missing gap arrives. |
+| **Sequence Wrap (65535 → 0)** | 16-bit serial arithmetic handles continuous delivery across 0 boundary. |
+| **Peer Sends RESET** | Connection transitions to closed immediately; pending calls return reset error. |
+| **Peer Sends FIN** | Connection acknowledges FIN, drains remaining read buffer, returns `io.EOF`. |
 
-The torrent parser reads the `.torrent` file and extracts information such as:
+---
 
-* Tracker URL
-* File name
-* File size
-* Piece length
-* Piece hashes
-* Info hash
+## Adaptive RTO & Congestion Control
 
-The torrent metadata is encoded using **Bencode**.
+### Jacobson's Algorithm (RTT Estimation)
 
-### Tracker Communication
+For each valid sample $R$ measured from non-retransmitted segments:
 
-The client sends an HTTP request to the tracker containing parameters such as:
+$$\text{Error} = R - \text{SRTT}$$
+$$\text{RTTVAR} \leftarrow (1 - \beta) \cdot \text{RTTVAR} + \beta \cdot |\text{Error}| \quad (\beta = 0.25)$$
+$$\text{SRTT} \leftarrow (1 - \alpha) \cdot \text{SRTT} + \alpha \cdot R \quad (\alpha = 0.125)$$
+$$\text{RTO} \leftarrow \text{clamp}(\text{SRTT} + 4 \cdot \text{RTTVAR}, \text{minRTO}, \text{maxRTO})$$
 
-```text
-info_hash
-peer_id
-port
-uploaded
-downloaded
-left
-compact
-numwant
-```
+### Congestion Window Dynamics
 
-The tracker returns information about available peers.
+* **Slow Start ($cwnd < ssthresh$)**: $cwnd \leftarrow cwnd + \text{bytesAcked}$
+* **Congestion Avoidance ($cwnd \ge ssthresh$)**: $cwnd \leftarrow cwnd + \frac{\text{bytesAcked} \cdot \text{MSS}}{cwnd}$
+* **Packet Loss (RTO timeout)**: $ssthresh \leftarrow \max\left(\frac{cwnd}{2}, minCwnd\right)$, $cwnd \leftarrow minCwnd$
 
-The client supports:
+---
 
-* Compact peer responses
-* Dictionary-style peer responses
+## Testing & Validation Suite
 
-### Peer Discovery
-
-A peer is represented by an IPv4 address and port:
-
-```go
-type peer struct {
-    ip   [4]byte
-    port uint16
-}
-```
-
-The client converts the tracker response into a list of peers and attempts to establish TCP connections.
-
-## BitTorrent Handshake
-
-After connecting to a peer, the client performs the BitTorrent handshake.
-
-The handshake allows both sides to exchange:
-
-* Protocol identifier
-* Reserved bytes
-* Info hash
-* Peer ID
-
-The info hash identifies the torrent being requested.
-
-## Bitfield
-
-A peer's bitfield indicates which pieces of the file that peer has.
-
-For example:
-
-```text
-10110010
-```
-
-Each bit represents a piece:
-
-```text
-1 → peer has the piece
-0 → peer does not have the piece
-```
-
-The client checks this information before requesting a piece.
-
-`have` messages can also update the peer's available pieces during a connection.
-
-## Piece Downloading
-
-The torrent is divided into pieces.
-
-Each piece is divided into smaller blocks when requesting data from a peer.
-
-A request contains:
-
-```text
-Piece Index
-Block Offset
-Block Length
-```
-
-These values are encoded using **big-endian byte order**, as required by the BitTorrent wire protocol.
-
-Multiple pieces can be processed concurrently using Go goroutines and channels.
-
-## Piece Verification
-
-Every piece has a SHA-1 hash stored in the torrent metadata.
-
-After downloading a piece:
-
-```text
-Downloaded piece
-       |
-       v
-Calculate SHA-1
-       |
-       v
-Compare with expected hash
-       |
-    +--+--+
-    |     |
-  Match  Fail
-    |     |
- Accept  Retry
-```
-
-This prevents corrupted or incomplete pieces from being accepted.
-
-## Concurrency
-
-The client uses Go concurrency primitives to download pieces from peers.
-
-The general structure is:
-
-```text
-              Piece Work Channel
-                     |
-        +------------+------------+
-        |            |            |
-        v            v            v
-     Worker 1     Worker 2     Worker 3
-        |            |            |
-        +------------+------------+
-                     |
-                     v
-              Results Channel
-```
-
-Workers receive piece work, check whether the peer has the requested piece, download it, verify its integrity, and return the result.
-
-## Debugging
-
-The project includes debug logging for troubleshooting the BitTorrent protocol.
-
-Examples include:
-
-```text
-[STEP] TCP connection established
-[STEP] BitTorrent handshake completed
-[DEBUG] PIECE WORK
->>> CHECKING BITFIELD
->>> PEER DOES NOT HAVE PIECE
-```
-
-Debugging was particularly useful for identifying issues involving:
-
-* Tracker responses
-* Peer connections
-* Handshake communication
-* Bitfields
-* Piece availability
-* Piece requests
-* Worker/channel behavior
-
-## Important Protocol Details
-
-### Network Byte Order
-
-BitTorrent uses network byte order (big-endian) for integer fields in protocol messages.
-
-For example:
-
-```go
-binary.BigEndian.PutUint32(...)
-```
-
-is used when constructing piece requests.
-
-### Request Backlog
-
-The client keeps track of outstanding block requests.
-
-When a `piece` message is received, the number of outstanding requests is reduced so additional blocks can be requested.
-
-### Bitfield Size
-
-The bitfield is sized according to the total number of pieces in the torrent rather than the current number of pieces remaining in the work queue.
-
-### Bounds Checking
-
-Piece indexes received from peers are checked before modifying the bitfield to prevent invalid indexes from causing runtime panics.
-
-## Peer Discovery and Peer Management
-
-Peers come from several sources, all merged into one peer table:
-
-```text
-   HTTP trackers      UDP trackers (BEP 15)      Local Service Discovery (BEP 14)
-         │                    │                               │
-         └────────────────────┼───────────────────────────────┘
-                              ▼
-                        Peer Manager
-              (de-duplicate, measure, score, back off)
-                              │
-                              ▼
-                 Best peers → download workers
-```
-
-* `discovery.go`
-  * Reads every tracker in `announce` and `announce-list` (BEP 12).
-  * Announces to HTTP and `udp://` trackers and re-announces on each tracker's `interval`.
-  * UDP tracker protocol: `connect` then `announce`, with retries and transaction-id checks.
-  * Local Service Discovery: multicast `BT-SEARCH` announcements on `239.192.152.143:6771`, sent on every network interface, to find peers on the same LAN.
-* `peer_manager.go`
-  * Peer table keyed by `ip:port`, so duplicates from different sources are merged.
-  * Measures **RTT** (TCP connect time), **download speed** (verified bytes / time) and **reliability** (successful pieces / attempts).
-  * **Score** from 0 to 100: `50% speed + 20% RTT + 30% reliability`. Untested peers start at 50, so new peers are tried before peers that failed.
-  * Unreachable or failing peers back off (30 s, 60 s, 90 s … up to 10 min). Peers that send 3 corrupt pieces are banned.
-  * Up to 30 peers are downloaded from at once. When one fails, its slot goes to the next best peer automatically.
-
-Every 15 seconds the client logs the peer table:
-
-```text
-Peer                        RTT       Speed  Reliability  Score  State    Source
-------------------------------------------------------------------------------------------
-127.0.0.1:61137            1 ms   68.2 MB/s         100%    100  active   udp:127.0.0.1
-127.0.0.1:61138            1 ms           -           0%     20  banned   udp:127.0.0.1
-127.0.0.1:61139               -           -           0%      0  backoff  udp:127.0.0.1
-```
-
-The download stops with an error if no piece arrives for 2 minutes.
-
-## Tests
+The test suite covers unit tests, integration tests, network impairment proxies, and benchmarks:
 
 ```bash
-go test ./...
+# Run all tests
+go test -v ./...
+
+# Run transport & fallback tests
+go test -v -run "TestTransport|TestDialWithFallback"
+
+# Run μTP unit & correctness tests
+go test -v -run "TestSeqWrap|TestOrder|TestMalformed|TestShutdown|TestGoroutineLeak"
+
+# Run impairment & network condition tests
+go test -v -run "TestPacketLoss|TestLatency|TestFlowControl|TestCongestion"
+
+# Run benchmarks
+go test -bench "Benchmark" -benchmem
 ```
 
-* Unit tests for the peer table, scoring, back-off and banning.
-* A fake UDP tracker that checks the exact BEP 15 byte layout.
-* LSD message parsing, plus two LSD instances discovering each other (skipped if multicast is blocked).
-* An end-to-end download through a fake UDP tracker, a good seeder, a seeder that corrupts data, and a dead peer.
+### Benchmark Results (Loopback Transfer)
 
-To test against real trackers (needs a network that allows torrent traffic):
+| Metric | TCP | μTP |
+|---|---|---|
+| **Loopback Throughput** | ~70.0 MB/s | ~58.3 MB/s |
+| **Packet Marshal** | — | 304 ns/op |
+| **Packet Unmarshal** | — | 226 ns/op |
+| **ACK Processing (1000 items)** | — | 104 μs |
+
+---
+
+## Building & Running
+
+### Build
 
 ```bash
-LIVE_TORRENT=some.torrent go test -run TestLiveDiscovery -v
+go build -o torrent-client.exe .
 ```
 
-## Running the Client
-
-Make sure Go is installed.
-
-Check the Go version:
+### Usage
 
 ```bash
-go version
-```
-
-Download dependencies:
-
-```bash
-go mod download
-```
-
-Run the client:
-
-```bash
-go run . <torrent-file> <output-file>
-```
-
-Example:
-
-```bash
-go run . test.torrent download.iso
-```
-
-## Building
-
-To create an executable:
-
-```bash
-go build -o torrent-client
-```
-
-On Windows:
-
-```powershell
-go build -o torrent-client.exe
-```
-
-Then:
-
-```powershell
+# Download a file via torrent
 .\torrent-client.exe test.torrent download.iso
 ```
 
-## Current Limitations
-
-This implementation is primarily designed for learning and experimentation with the BitTorrent protocol.
-
-Current limitations include:
-
-* Primarily focused on single-file torrents
-* Multi-file torrents are not currently supported
-* Download only: the client does not upload or accept incoming connections
-* No DHT or peer exchange (PEX) yet
-* Pieces are still requested in queue order, not rarest-first
-
-## Technologies Used
-
-* **Go**
-* **TCP/IP**
-* **HTTP**
-* **Bencode**
-* **BitTorrent Protocol**
-* **SHA-1**
-* **Goroutines**
-* **Channels**
-
-## Learning Goals
-
-This project was built to understand how BitTorrent works internally rather than treating it as a black-box application.
-
-The main concepts explored are:
-
-* Peer-to-peer networking
-* Binary network protocols
-* TCP connections
-* HTTP tracker communication
-* Bencode encoding and decoding
-* SHA-1 hashing
-* Bitfields
-* Concurrent programming
-* Goroutines
-* Channels
-* Network debugging
-* Piece-based file transfer
+---
 
 ## License
 
-This project is intended for educational and research purposes.
+This project is created for educational, research, and high-performance networking exploration.

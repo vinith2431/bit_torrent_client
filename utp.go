@@ -4,11 +4,21 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net"
 	"sync"
 	"time"
 )
+
+// utpDebug controls verbose uTP packet logging. Set to true to enable.
+var utpDebug = false
+
+func utpLog(format string, args ...interface{}) {
+	if utpDebug {
+		log.Printf("[uTP] "+format, args...)
+	}
+}
 
 const (
 	utpVersion = 1
@@ -212,6 +222,7 @@ func (u *utpConn) updateRTTLocked(sample time.Duration) {
 		newRTO = maxRTO
 	}
 	u.rto = newRTO
+	utpLog("RTT sample=%v srtt=%v rttvar=%v rto=%v", sample, u.srtt, u.rttvar, u.rto)
 }
 
 func (u *utpConn) updateRTT(sample time.Duration) {
@@ -221,6 +232,7 @@ func (u *utpConn) updateRTT(sample time.Duration) {
 }
 
 func (u *utpConn) processAck(ackNr uint16) {
+	utpLog("ACK received ack=%d", ackNr)
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
@@ -298,6 +310,7 @@ func (u *utpConn) checkRetransmit() error {
 	for seq, seg := range u.unacked {
 		if now.Sub(seg.sentAt) > rto {
 			if seg.attempts >= maxRetries {
+				utpLog("connection failed seq=%d max retries exceeded", seq)
 				u.closeErr = fmt.Errorf("uTP packet %d timed out after %d attempts", seq, seg.attempts)
 				u.isClosed = true
 				if u.windowCond != nil {
@@ -320,6 +333,7 @@ func (u *utpConn) checkRetransmit() error {
 
 			seg.attempts++
 			seg.sentAt = now
+			utpLog("retransmit seq=%d attempt=%d rto=%v", seq, seg.attempts, rto)
 			if u.conn != nil && u.remoteAddr != nil {
 				u.conn.WriteToUDP(seg.packet.marshal(), u.remoteAddr)
 			}
@@ -354,6 +368,7 @@ func (u *utpConn) handleDataPacket(packet *utpPacket) ([]byte, error) {
 
 	// Duplicate or already processed packet
 	if seqDiff < 0 {
+		utpLog("DATA duplicate seq=%d (expecting %d)", packet.SequenceNumber, u.expectedSeq)
 		ack := &utpPacket{
 			Type:           utpTypeST_STATE,
 			Version:        utpVersion,
@@ -372,6 +387,7 @@ func (u *utpConn) handleDataPacket(packet *utpPacket) ([]byte, error) {
 	// Out-of-order packet: buffer it
 	if seqDiff > 0 {
 		u.recvBuffer[packet.SequenceNumber] = append([]byte(nil), packet.Payload...)
+		utpLog("DATA buffered seq=%d expecting=%d", packet.SequenceNumber, u.expectedSeq)
 		ack := &utpPacket{
 			Type:           utpTypeST_STATE,
 			Version:        utpVersion,
@@ -406,6 +422,7 @@ func (u *utpConn) handleDataPacket(packet *utpPacket) ([]byte, error) {
 		}
 	}
 
+	utpLog("DATA delivered seq=%d len=%d expectedNext=%d", packet.SequenceNumber, len(delivered), u.expectedSeq)
 	ack := &utpPacket{
 		Type:           utpTypeST_STATE,
 		Version:        utpVersion,
@@ -469,6 +486,7 @@ func dialUTP(p peer) (peer_conn, error) {
 		conn.Close()
 		return nil, err
 	}
+	utpLog("SYN sent connID=%d seq=%d", u.connectionID, syn.SequenceNumber)
 
 	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		conn.Close()
@@ -509,6 +527,7 @@ func dialUTP(p peer) (peer_conn, error) {
 	if response.WindowSize > 0 {
 		u.peerWindow = response.WindowSize
 	}
+	utpLog("STATE received seq=%d ack=%d peerWindow=%d", response.SequenceNumber, response.AckNumber, response.WindowSize)
 
 	conn.SetReadDeadline(time.Time{})
 
@@ -595,6 +614,7 @@ func (u *utpConn) Read(p []byte) (int, error) {
 			return copied, nil
 
 		case utpTypeST_FIN:
+			utpLog("FIN received, EOF")
 			u.mu.Lock()
 			// Send STATE ACK for FIN
 			ack := &utpPacket{
@@ -620,6 +640,7 @@ func (u *utpConn) Read(p []byte) (int, error) {
 			return 0, io.EOF
 
 		case utpTypeST_RESET:
+			utpLog("RESET received from peer")
 			u.mu.Lock()
 			u.isClosed = true
 			u.closeErr = fmt.Errorf("uTP connection reset by peer")
@@ -687,6 +708,8 @@ func (u *utpConn) Write(p []byte) (int, error) {
 	}
 	u.mu.Unlock()
 
+	utpLog("DATA sent seq=%d len=%d", seq, len(p))
+
 	if conn != nil && remoteAddr != nil {
 		_, err := conn.WriteToUDP(packet.marshal(), remoteAddr)
 		if err != nil {
@@ -753,6 +776,8 @@ func (u *utpConn) Close() error {
 	conn := u.conn
 	advWindow := u.advertisedWindowLocked()
 	u.mu.Unlock()
+
+	utpLog("connection closing connID=%d", connID)
 
 	if conn != nil && remoteAddr != nil {
 		fin := &utpPacket{
