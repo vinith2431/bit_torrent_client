@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -78,6 +79,13 @@ func recv_bitfield(conn peer_conn, num_pieces int) (bitfield, bool, error) {
 	for {
 		msg, err := read_message(conn)
 		if err != nil {
+			// Timing out without a bitfield is fine: peers with no pieces
+			// may skip it, and some only send have messages. Only a real
+			// connection error (closed, reset) is a failure.
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				return bf, choked, nil
+			}
 			return bf, choked, err
 		}
 
