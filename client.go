@@ -13,13 +13,16 @@ type client struct {
 	peer_id   [20]byte
 	bitfield  bitfield
 	choked    bool
+	rtt       time.Duration // TCP connect time, used as the peer's RTT
 }
 
 func new_client(p peer, info_hash [20]byte, peer_id [20]byte, num_pieces int) (*client, error) {
+	start := time.Now()
 	conn, err := net.DialTimeout("tcp", p.String(), 10*time.Second)
 	if err != nil {
 		return nil, err
 	}
+	rtt := time.Since(start) // SYN -> SYN-ACK is one round trip
 
 	if err := do_handshake(conn, info_hash, peer_id); err != nil {
 		conn.Close()
@@ -39,6 +42,7 @@ func new_client(p peer, info_hash [20]byte, peer_id [20]byte, num_pieces int) (*
 		peer_id:   peer_id,
 		bitfield:  bf,
 		choked:    choked,
+		rtt:       rtt,
 	}, nil
 }
 
