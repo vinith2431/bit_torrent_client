@@ -5,7 +5,7 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"log"
-	"runtime"
+	"sync/atomic"
 	"time"
 )
 
@@ -63,6 +63,11 @@ func (pp *piece_progress) handle_message(c *client) error {
 
 	case msg_choke:
 		c.choked = true
+		pp.requested = pp.downloaded
+		pp.backlog = 0
+
+	case msg_bitfield:
+		c.bitfield = msg.payload
 
 	case msg_have:
 		index, err := parse_have(msg)
@@ -77,6 +82,7 @@ func (pp *piece_progress) handle_message(c *client) error {
 			return err
 		}
 		pp.downloaded += n
+		pp.backlog--
 	}
 
 	return nil
@@ -113,8 +119,8 @@ func check_integrity(pw *piece_work, data []byte) error {
 	return nil
 }
 
-func start_download_worker(p peer, info_hash [20]byte, peer_id [20]byte, work_ch chan *piece_work, results_ch chan *piece_result) {
-	c, err := new_client(p, info_hash, peer_id, len(work_ch))
+func start_download_worker(p peer, info_hash [20]byte, peer_id [20]byte, num_pieces int, work_ch chan *piece_work, results_ch chan *piece_result) {
+	c, err := new_client(p, info_hash, peer_id, num_pieces)
 	if err != nil {
 		log.Printf("could not connect to peer %s: %v\n", p, err)
 		return
@@ -131,11 +137,17 @@ func start_download_worker(p peer, info_hash [20]byte, peer_id [20]byte, work_ch
 	}
 	log.Printf("sent interested to %s, choked=%v\n", p, c.choked)
 
+	misses := 0
 	for pw := range work_ch {
 		if !c.bitfield.has_piece(pw.index) {
 			work_ch <- pw
+			if misses++; misses > 100 {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
 			continue
 		}
+		misses = 0
 
 		data, err := download_piece(c, pw)
 		if err != nil {
@@ -167,6 +179,9 @@ func (t *torrent_file) download() ([]byte, error) {
 		return nil, err
 	}
 	log.Printf("got %d peers from tracker\n", len(peers))
+	if len(peers) == 0 {
+		return nil, fmt.Errorf("tracker returned no peers")
+	}
 
 	work_ch := make(chan *piece_work, len(t.piece_hashes))
 	results_ch := make(chan *piece_result)
@@ -176,15 +191,29 @@ func (t *torrent_file) download() ([]byte, error) {
 		work_ch <- &piece_work{index, hash, length}
 	}
 
+	alive := int32(len(peers))
+	dead := make(chan struct{})
 	for _, p := range peers {
-		go start_download_worker(p, t.info_hash, peer_id, work_ch, results_ch)
+		go func(p peer) {
+			defer func() {
+				if atomic.AddInt32(&alive, -1) == 0 {
+					close(dead)
+				}
+			}()
+			start_download_worker(p, t.info_hash, peer_id, len(t.piece_hashes), work_ch, results_ch)
+		}(p)
 	}
 
 	buf := make([]byte, t.length)
 	done_pieces := 0
 
 	for done_pieces < len(t.piece_hashes) {
-		result := <-results_ch
+		var result *piece_result
+		select {
+		case result = <-results_ch:
+		case <-dead:
+			return nil, fmt.Errorf("all peers exhausted at %d/%d pieces", done_pieces, len(t.piece_hashes))
+		}
 
 		begin := result.index * t.piece_length
 		end := begin + len(result.data)
@@ -192,10 +221,8 @@ func (t *torrent_file) download() ([]byte, error) {
 		done_pieces++
 
 		percent := float64(done_pieces) / float64(len(t.piece_hashes)) * 100
-		num_workers := runtime.NumGoroutine() - 1
-		log.Printf("%.2f%% done — piece %d downloaded, %d peers active\n", percent, result.index, num_workers)
+		log.Printf("%.2f%% done — piece %d downloaded, %d peers active\n", percent, result.index, atomic.LoadInt32(&alive))
 	}
-	close(work_ch)
 
 	return buf, nil
 }
