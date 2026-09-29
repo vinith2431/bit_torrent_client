@@ -398,7 +398,7 @@ func (t *torrent_file) start_download_worker(
 ) worker_outcome {
 	p := pi.addr
 
-	c, err := new_client(p, t.info_hash, peerID, len(t.piece_hashes))
+	c, err := new_client(p, t.info_hash, peerID, len(t.piece_hashes), transport_tcp)
 	if err != nil {
 		log.Printf("could not connect to peer %s: %v", p, err)
 		return outcome_failed
@@ -873,7 +873,7 @@ func (t *torrent_file) piece_length_at(index int) int {
 // is done or the peer stops being useful, and reports how it went.
 func start_download_worker(pm *peer_manager, pi *peer_info, info_hash [20]byte, peer_id [20]byte, num_pieces int, work_ch chan *piece_work, results_ch chan *piece_result, done <-chan struct{}) worker_outcome {
 	p := pi.addr
-	c, err := new_client(p, info_hash, peer_id, num_pieces)
+	c, err := new_client(p, info_hash, peer_id, num_pieces, transport_tcp)
 	if err != nil {
 		log.Printf("could not connect to peer %s: %v\n", p, err)
 		return outcome_failed

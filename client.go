@@ -19,9 +19,9 @@ type client struct {
 	rtt       time.Duration // TCP connect time, used as the peer's RTT
 }
 
-func new_client(p peer, info_hash [20]byte, peer_id [20]byte, num_pieces int) (*client, error) {
+func new_client(p peer, info_hash [20]byte, peer_id [20]byte, num_pieces int, mode transport_mode) (*client, error) {
 	start := time.Now()
-	conn, err := dial_peer(p, transport_tcp)
+	conn, err := dial_peer(p, mode)
 	if err != nil {
 		return nil, err
 	}
