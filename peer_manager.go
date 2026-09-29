@@ -32,15 +32,18 @@ const (
 // peer_info is everything we know about one peer.
 type peer_info struct {
 	addr        peer
-	source      string        // where we first heard of it: "udp:host", "http:host", "lsd"
-	rtt         time.Duration // TCP connect time, 0 if never connected
-	bytes       int64         // verified bytes received
-	busy        time.Duration // time spent downloading those bytes
-	ok          int           // pieces that passed SHA-1
-	failed      int           // connection or transfer failures
-	hash_fails  int           // pieces that failed SHA-1
-	active      bool          // a worker is connected to it right now
-	retry_after time.Time     // backoff after a failure
+	source      string
+	rtt         time.Duration
+	bytes       int64
+	busy        time.Duration
+	ok          int
+	failed      int
+	hash_fails  int
+	active      bool
+	retry_after time.Time
+
+	// Bitfield tells us which pieces this peer has.
+	bitfield bitfield
 }
 
 // speed is the average verified download speed in bytes/sec.
@@ -187,6 +190,49 @@ func (pm *peer_manager) counts() (known, active int) {
 	}
 	return len(pm.peers), active
 }
+
+// rarest_piece_for returns the rarest piece that this peer has
+// among the pieces that are still pending.
+//
+// The returned index is -1 if this peer has no useful piece.
+func (pm *peer_manager) rarest_piece_for(
+	pi *peer_info,
+	pending []bool,
+) int {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	best := -1
+	bestCount := int(^uint(0) >> 1)
+
+	for piece := range pending {
+		if !pending[piece] {
+			continue
+		}
+
+		// The selected peer must actually have this piece.
+		if !pi.bitfield.has_piece(piece) {
+			continue
+		}
+
+		// Count how many known peers have this piece.
+		count := 0
+
+		for _, other := range pm.peers {
+			if other.bitfield.has_piece(piece) {
+				count++
+			}
+		}
+
+		if count < bestCount {
+			best = piece
+			bestCount = count
+		}
+	}
+
+	return best
+}
+
 
 // table renders the top peers by score.
 func (pm *peer_manager) table(limit int) string {
