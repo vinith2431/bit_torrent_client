@@ -2,3 +2,5 @@ torrent-client
 *.iso
 *.torrent
 *.exe
+*.part
+*.resume

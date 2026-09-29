@@ -9,7 +9,7 @@ import (
 )
 
 type client struct {
-	conn      net.Conn
+	conn      peer_conn
 	peer      peer
 	info_hash [20]byte
 	peer_id   [20]byte
@@ -20,7 +20,7 @@ type client struct {
 
 func new_client(p peer, info_hash [20]byte, peer_id [20]byte, num_pieces int) (*client, error) {
 	start := time.Now()
-	conn, err := net.DialTimeout("tcp", p.String(), 10*time.Second)
+	conn, err := dial_peer(p)
 	if err != nil {
 		return nil, err
 	}
