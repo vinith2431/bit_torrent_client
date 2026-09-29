@@ -158,10 +158,12 @@ func start_download_worker(pm *peer_manager, pi *peer_info, info_hash [20]byte, 
 
 		if !c.bitfield.has_piece(pw.index) {
 			work_ch <- pw
-			if misses++; misses > num_pieces {
+			// Give up once we have gone through every queued piece without
+			// finding one this peer has. No sleep: a peer that has nothing
+			// we need should free its slot quickly for the next best peer.
+			if misses++; misses > len(work_ch) {
 				return outcome_useless
 			}
-			time.Sleep(200 * time.Millisecond)
 			continue
 		}
 		misses = 0
