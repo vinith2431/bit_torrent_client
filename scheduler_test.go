@@ -349,5 +349,3 @@ func TestSchedulerFirstCompletedEndgameResultWins(t *testing.T) {
 			duplicate)
 	}
 }
-
-

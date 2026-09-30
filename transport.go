@@ -12,6 +12,17 @@ const (
 	transport_utp
 )
 
+func (m transport_mode) String() string {
+	switch m {
+	case transport_utp:
+		return "μTP / UDP"
+	case transport_tcp:
+		return "TCP"
+	default:
+		return "Unknown"
+	}
+}
+
 func dial_peer(p peer, mode transport_mode) (peer_conn, error) {
 	switch mode {
 	case transport_tcp:

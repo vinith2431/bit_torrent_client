@@ -50,6 +50,41 @@ func new_client(p peer, info_hash [20]byte, peer_id [20]byte, num_pieces int, mo
 	}, nil
 }
 
+func new_client_with_fallback(p peer, info_hash [20]byte, peer_id [20]byte, num_pieces int) (*client, error) {
+	conn, mode, err := dial_with_fallback(p)
+	if err != nil {
+		return nil, err
+	}
+
+	start := time.Now()
+	if err := do_handshake(conn, info_hash, peer_id); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	rtt := time.Since(start)
+
+	if u, ok := conn.(*utpConn); ok && u.srtt > 0 {
+		rtt = u.srtt
+	}
+
+	bf, choked, err := recv_bitfield(conn, num_pieces)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	return &client{
+		conn:      conn,
+		peer:      p,
+		info_hash: info_hash,
+		peer_id:   peer_id,
+		transport: mode,
+		bitfield:  bf,
+		choked:    choked,
+		rtt:       rtt,
+	}, nil
+}
+
 func do_handshake(conn peer_conn, info_hash [20]byte, peer_id [20]byte) error {
 	conn.SetDeadline(time.Now().Add(3 * time.Second))
 	defer conn.SetDeadline(time.Time{})
@@ -134,42 +169,36 @@ func recv_bitfield(conn peer_conn, num_pieces int) (bitfield, bool, error) {
 	}
 }
 
-// send_request sends a request message asking for a block.
 func (c *client) send_request(index, begin, length int) error {
 	msg := format_request(index, begin, length)
 	_, err := c.conn.Write(msg.serialize())
 	return err
 }
 
-// send_interested tells the peer we want pieces from them.
 func (c *client) send_interested() error {
 	msg := &message{id: msg_interested}
 	_, err := c.conn.Write(msg.serialize())
 	return err
 }
 
-// send_not_interested tells the peer we don't need anything from them.
 func (c *client) send_not_interested() error {
 	msg := &message{id: msg_not_interested}
 	_, err := c.conn.Write(msg.serialize())
 	return err
 }
 
-// send_unchoke tells the peer they can request pieces from us.
 func (c *client) send_unchoke() error {
 	msg := &message{id: msg_unchoke}
 	_, err := c.conn.Write(msg.serialize())
 	return err
 }
 
-// send_have tells the peer we finished downloading a piece.
 func (c *client) send_have(index int) error {
 	msg := format_have(index)
 	_, err := c.conn.Write(msg.serialize())
 	return err
 }
 
-// read reads one message from the peer and updates client state.
 func (c *client) read() (*message, error) {
 	msg, err := read_message(c.conn)
 	if err != nil {

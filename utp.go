@@ -21,6 +21,12 @@ func utpLog(format string, args ...interface{}) {
 }
 
 const (
+	maxUTPPacketSize   = 64 * 1024
+	maxRecvBufferBytes = 4 * 1024 * 1024
+	maxBufferedPackets = 4096
+)
+
+const (
 	utpVersion = 1
 
 	utpTypeST_DATA  uint8 = 0
@@ -73,6 +79,14 @@ func unmarshalUTPPacket(buf []byte) (*utpPacket, error) {
 		)
 	}
 
+	if len(buf) > maxUTPPacketSize {
+		return nil, fmt.Errorf(
+			"uTP packet too large: %d bytes (max: %d)",
+			len(buf),
+			maxUTPPacketSize,
+		)
+	}
+
 	version := buf[0] & 0x0f
 	if version != utpVersion {
 		return nil, fmt.Errorf(
@@ -81,8 +95,16 @@ func unmarshalUTPPacket(buf []byte) (*utpPacket, error) {
 		)
 	}
 
+	pktType := buf[0] >> 4
+	switch pktType {
+	case utpTypeST_DATA, utpTypeST_FIN, utpTypeST_STATE, utpTypeST_RESET, utpTypeST_SYN:
+		// Valid type
+	default:
+		return nil, fmt.Errorf("invalid uTP packet type: %d", pktType)
+	}
+
 	p := &utpPacket{
-		Type:           buf[0] >> 4,
+		Type:           pktType,
 		Version:        version,
 		Extension:      buf[1],
 		ConnectionID:   binary.BigEndian.Uint16(buf[2:4]),
@@ -330,10 +352,12 @@ func (u *utpConn) checkRetransmit() error {
 			}
 			u.ssthresh = half
 			u.cwnd = minC
+			LogDashboardEvent("↓", "CWND reduced to %d KB upon loss detection", u.cwnd/1024)
 
 			seg.attempts++
 			seg.sentAt = now
 			utpLog("retransmit seq=%d attempt=%d rto=%v", seq, seg.attempts, rto)
+			LogDashboardEvent("↻", "Retransmitted seq=%d (attempt %d, RTO=%v)", seq, seg.attempts, rto)
 			if u.conn != nil && u.remoteAddr != nil {
 				u.conn.WriteToUDP(seg.packet.marshal(), u.remoteAddr)
 			}
@@ -386,6 +410,22 @@ func (u *utpConn) handleDataPacket(packet *utpPacket) ([]byte, error) {
 
 	// Out-of-order packet: buffer it
 	if seqDiff > 0 {
+		// Check packet count limit
+		if len(u.recvBuffer) >= maxBufferedPackets {
+			utpLog("dropped out-of-order packet seq=%d: max packet limit %d reached", packet.SequenceNumber, maxBufferedPackets)
+			return nil, nil
+		}
+
+		// Calculate total buffered bytes
+		var bufferedBytes int
+		for _, b := range u.recvBuffer {
+			bufferedBytes += len(b)
+		}
+		if bufferedBytes+len(packet.Payload) > maxRecvBufferBytes {
+			utpLog("dropped out-of-order packet seq=%d: max buffer bytes %d exceeded", packet.SequenceNumber, maxRecvBufferBytes)
+			return nil, nil
+		}
+
 		u.recvBuffer[packet.SequenceNumber] = append([]byte(nil), packet.Payload...)
 		utpLog("DATA buffered seq=%d expecting=%d", packet.SequenceNumber, u.expectedSeq)
 		ack := &utpPacket{
@@ -528,6 +568,7 @@ func dialUTP(p peer) (peer_conn, error) {
 		u.peerWindow = response.WindowSize
 	}
 	utpLog("STATE received seq=%d ack=%d peerWindow=%d", response.SequenceNumber, response.AckNumber, response.WindowSize)
+	LogDashboardEvent("✓", "uTP Handshake established with %s (connID=%d)", p.String(), response.ConnectionID)
 
 	conn.SetReadDeadline(time.Time{})
 
@@ -801,4 +842,48 @@ func (u *utpConn) Close() error {
 
 func (u *utpConn) SetDeadline(t time.Time) error {
 	return u.conn.SetDeadline(t)
+}
+
+// DashboardTransport provides a clean snapshot of connection and congestion metrics.
+type DashboardTransport struct {
+	Mode          string
+	Connected     bool
+	RemoteAddr    string
+	RTT           time.Duration
+	RTO           time.Duration
+	CWND          uint32
+	PeerWindow    uint32
+	BytesInFlight uint32
+	Retries       int
+}
+
+type UTPStats = DashboardTransport
+
+func (u *utpConn) Stats() DashboardTransport {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	var retries int
+	for _, s := range u.unacked {
+		if s.attempts > 1 {
+			retries += s.attempts - 1
+		}
+	}
+
+	addr := ""
+	if u.remoteAddr != nil {
+		addr = u.remoteAddr.String()
+	}
+
+	return UTPStats{
+		Mode:          "μTP / UDP",
+		Connected:     !u.isClosed,
+		RemoteAddr:    addr,
+		RTT:           u.srtt,
+		RTO:           u.rto,
+		CWND:          u.cwnd,
+		PeerWindow:    u.peerWindow,
+		BytesInFlight: u.bytesInFlightLocked(),
+		Retries:       retries,
+	}
 }

@@ -233,7 +233,6 @@ func (pm *peer_manager) rarest_piece_for(
 	return best
 }
 
-
 // table renders the top peers by score.
 func (pm *peer_manager) table(limit int) string {
 	pm.mu.Lock()
@@ -301,4 +300,50 @@ func fmt_reliability(pi *peer_info) string {
 		return "-"
 	}
 	return fmt.Sprintf("%.0f%%", 100*pi.reliability())
+}
+
+// PeerSnapshot is a clean view of a peer for dashboard display.
+type PeerSnapshot struct {
+	Addr        string
+	RTT         time.Duration
+	Speed       float64
+	Reliability float64
+	Score       float64
+	State       string
+	Source      string
+}
+
+// Snapshot returns the top peers sorted by score.
+func (pm *peer_manager) Snapshot(limit int) []PeerSnapshot {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	list := make([]*peer_info, 0, len(pm.peers))
+	for _, pi := range pm.peers {
+		list = append(list, pi)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if si, sj := list[i].score(), list[j].score(); si != sj {
+			return si > sj
+		}
+		return list[i].addr.String() < list[j].addr.String()
+	})
+
+	now := time.Now()
+	res := make([]PeerSnapshot, 0, len(list))
+	for i, pi := range list {
+		if limit > 0 && i >= limit {
+			break
+		}
+		res = append(res, PeerSnapshot{
+			Addr:        pi.addr.String(),
+			RTT:         pi.rtt,
+			Speed:       pi.speed(),
+			Reliability: pi.reliability(),
+			Score:       pi.score(),
+			State:       pi.state(now),
+			Source:      pi.source,
+		})
+	}
+	return res
 }

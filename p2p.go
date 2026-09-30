@@ -60,9 +60,6 @@ func (pq piece_priority_queue) Less(i, j int) bool {
 	if pq.items[i].availability != pq.items[j].availability {
 		return pq.items[i].availability < pq.items[j].availability
 	}
-
-	// If two pieces have the same availability,
-	// use the lower piece index as a deterministic tie-breaker.
 	return pq.items[i].index < pq.items[j].index
 }
 
@@ -217,21 +214,13 @@ func (ps *piece_scheduler) next(bf bitfield) int {
 	defer ps.mu.Unlock()
 	endgame := ps.in_endgame_locked()
 
-	/*
-			Some pieces at the top of the global heap may not be
-			available from this particular peer.
-
-		Temporarily remove such pieces, search for the best piece
-		this peer actually owns, then put everything back.
-	*/
+	// Find the rarest eligible piece available from this peer
 	var skipped []piece_priority
 
 	for ps.queue.Len() > 0 {
 		item := heap.Pop(&ps.queue).(piece_priority)
 
 		index := item.index
-
-		// Keep the heap entry's availability synchronized.
 		item.availability = ps.availability[index]
 
 		if ps.complete[index] ||
@@ -244,17 +233,12 @@ func (ps *piece_scheduler) next(bf bitfield) int {
 			continue
 		}
 
-		// This is the rarest eligible piece for this peer.
 		ps.active[index]++
 
-		// Put the temporarily skipped entries back.
 		for _, skippedItem := range skipped {
 			heap.Push(&ps.queue, skippedItem)
 		}
 
-		// Put the selected piece back as well.
-		// It remains in the queue but is marked active,
-		// so another worker cannot claim it.
 		heap.Push(&ps.queue, item)
 
 		log.Printf(
@@ -577,13 +561,29 @@ func (t *torrent_file) start_download_worker(
 ) worker_outcome {
 	p := pi.addr
 
-	c, err := new_client(p, t.info_hash, peerID, len(t.piece_hashes), transport_tcp)
+	c, err := new_client_with_fallback(p, t.info_hash, peerID, len(t.piece_hashes))
 	if err != nil {
 		log.Printf("could not connect to peer %s: %v", p, err)
 		return outcome_failed
 	}
 
 	defer c.conn.Close()
+
+	if activeDashboard != nil {
+		if u, ok := c.conn.(*utpConn); ok {
+			activeDashboard.UpdateTransport(u.Stats())
+		} else {
+			activeDashboard.UpdateTransport(DashboardTransport{
+				Mode:       "TCP",
+				Connected:  true,
+				RemoteAddr: p.String(),
+				RTT:        c.rtt,
+				RTO:        c.rtt * 2,
+				CWND:       64 * 1024,
+				PeerWindow: 64 * 1024,
+			})
+		}
+	}
 
 	pm.mu.Lock()
 	pi.bitfield = append(bitfield(nil), c.bitfield...)
@@ -599,6 +599,7 @@ func (t *torrent_file) start_download_worker(
 		p,
 		c.rtt.Round(time.Millisecond),
 	)
+	LogDashboardEvent("●", "Connected to peer %s via %s (RTT %v)", p, c.transport.String(), c.rtt.Round(time.Millisecond))
 
 	if err := c.send_unchoke(); err != nil {
 		return outcome_failed
@@ -661,9 +662,11 @@ func (t *torrent_file) start_download_worker(
 				p,
 				err,
 			)
+			LogDashboardEvent("✖", "Piece %d from %s failed integrity check", index, p)
 
 			if pm.report_piece(pi, len(data), elapsed, false) {
 				log.Printf("banning peer %s after %d corrupt pieces", p, max_hash_fails)
+				LogDashboardEvent("✖", "Banned peer %s after %d corrupt pieces", p, max_hash_fails)
 				return outcome_failed
 			}
 			continue
@@ -744,6 +747,7 @@ func (t *torrent_file) fill_peer_slots(
 func (t *torrent_file) download() ([]byte, error) {
 	downloadStart := time.Now()
 	bytesDownloaded := int64(0)
+	sessionBytes := int64(0)
 
 	log.Println("starting download for", t.name)
 	log.Printf("%d trackers: %v", len(t.trackers), t.trackers)
@@ -784,11 +788,17 @@ func (t *torrent_file) download() ([]byte, error) {
 	}
 
 	donePieces := verified
+	for i, ok := range complete {
+		if ok {
+			bytesDownloaded += int64(t.piece_length_at(i))
+		}
+	}
 
 	log.Printf(
-		"resume: %d/%d pieces already complete",
+		"resume: %d/%d pieces already complete (%.1f MB)",
 		donePieces,
 		len(t.piece_hashes),
+		float64(bytesDownloaded)/(1024*1024),
 	)
 
 	if err := save_resume_state(t, complete); err != nil {
@@ -935,6 +945,8 @@ func (t *torrent_file) download() ([]byte, error) {
 			scheduler.set_complete(result.index)
 			donePieces++
 			bytesDownloaded += int64(len(result.data))
+			sessionBytes += int64(len(result.data))
+			LogDashboardEvent("✓", "Piece %d verified and saved (SHA-1 OK)", result.index)
 
 			if err := save_resume_state(
 				t,
@@ -963,7 +975,7 @@ func (t *torrent_file) download() ([]byte, error) {
 					100
 
 			elapsed := time.Since(downloadStart)
-			speed := float64(bytesDownloaded) / elapsed.Seconds()
+			speed := float64(sessionBytes) / elapsed.Seconds()
 
 			remainingBytes := int64(t.length) - bytesDownloaded
 
@@ -983,6 +995,12 @@ func (t *torrent_file) download() ([]byte, error) {
 				active,
 				known,
 			)
+
+			if activeDashboard != nil {
+				activeDashboard.UpdateProgress(donePieces, bytesDownloaded, speed, eta)
+				activeDashboard.UpdatePeers(pm.Snapshot(5))
+				activeDashboard.Render()
+			}
 
 		case <-table.C:
 			log.Printf(

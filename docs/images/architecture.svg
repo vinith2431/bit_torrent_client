@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 680" width="100%" height="100%" style="background:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <defs>
+    <linearGradient id="grad-blue" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1f6feb" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#1f6feb" stop-opacity="0.05"/>
+    </linearGradient>
+    <linearGradient id="grad-purple" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8957e5" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#8957e5" stop-opacity="0.05"/>
+    </linearGradient>
+    <linearGradient id="grad-green" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#238636" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#238636" stop-opacity="0.05"/>
+    </linearGradient>
+    <linearGradient id="grad-orange" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#d29922" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#d29922" stop-opacity="0.05"/>
+    </linearGradient>
+    <linearGradient id="grad-cyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#388bfd" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#388bfd" stop-opacity="0.05"/>
+    </linearGradient>
+    
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000" flood-opacity="0.4"/>
+    </filter>
+
+    <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#58a6ff"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#3fb950"/>
+    </marker>
+  </defs>
+
+  <!-- Title Section -->
+  <text x="500" y="45" text-anchor="middle" fill="#58a6ff" font-size="22" font-weight="700" letter-spacing="1">BITTORRENT CLIENT ARCHITECTURE</text>
+  <text x="500" y="70" text-anchor="middle" fill="#8b949e" font-size="13">High-Performance Dual-Transport (μTP / UDP + TCP) Engine</text>
+
+  <!-- 1. Input Box -->
+  <g transform="translate(370, 95)" filter="url(#shadow)">
+    <rect width="260" height="60" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <rect width="260" height="60" rx="8" fill="url(#grad-blue)"/>
+    <text x="130" y="27" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="600">.torrent File / Metainfo</text>
+    <text x="130" y="47" text-anchor="middle" fill="#8b949e" font-size="11">Bencode Parser • InfoHash • Piece Hashes</text>
+  </g>
+
+  <!-- Down Arrow 1 -->
+  <path d="M 500 155 L 500 185" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- 2. Discovery Layer -->
+  <g transform="translate(180, 185)" filter="url(#shadow)">
+    <rect width="640" height="75" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <rect width="640" height="75" rx="8" fill="url(#grad-purple)"/>
+    <text x="320" y="25" text-anchor="middle" fill="#bc8cff" font-size="14" font-weight="600">Peer Discovery Layer</text>
+    
+    <!-- Badges -->
+    <rect x="40" y="38" width="165" height="26" rx="4" fill="#21262d" stroke="#8957e5" stroke-width="1"/>
+    <text x="122" y="55" text-anchor="middle" fill="#d2a8ff" font-size="11">HTTP Tracker (BEP 03)</text>
+    
+    <rect x="235" y="38" width="170" height="26" rx="4" fill="#21262d" stroke="#8957e5" stroke-width="1"/>
+    <text x="320" y="55" text-anchor="middle" fill="#d2a8ff" font-size="11">UDP Tracker (BEP 15)</text>
+    
+    <rect x="435" y="38" width="165" height="26" rx="4" fill="#21262d" stroke="#8957e5" stroke-width="1"/>
+    <text x="517" y="55" text-anchor="middle" fill="#d2a8ff" font-size="11">LSD Multicast (BEP 14)</text>
+  </g>
+
+  <!-- Down Arrow 2 -->
+  <path d="M 500 260 L 500 290" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- 3. Peer Manager -->
+  <g transform="translate(250, 290)" filter="url(#shadow)">
+    <rect width="500" height="60" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <rect width="500" height="60" rx="8" fill="url(#grad-orange)"/>
+    <text x="250" y="27" text-anchor="middle" fill="#e3b341" font-size="14" font-weight="600">Peer Manager &amp; Adaptive Scoring</text>
+    <text x="250" y="47" text-anchor="middle" fill="#8b949e" font-size="11">RTT Latency Tracking • Bandwidth Scoring • Bad Peer Auto-Banning</text>
+  </g>
+
+  <!-- Split Paths to Dual Transport -->
+  <path d="M 400 350 L 400 370 L 320 370 L 320 390" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M 600 350 L 600 370 L 680 370 L 680 390" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- 4. Dual Transport Layer -->
+  <!-- Left: uTP -->
+  <g transform="translate(100, 390)" filter="url(#shadow)">
+    <rect width="440" height="120" rx="8" fill="#161b22" stroke="#1f6feb" stroke-width="2"/>
+    <rect width="440" height="120" rx="8" fill="url(#grad-blue)"/>
+    <text x="220" y="25" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="600">Primary: μTP Transport (BEP 29 / UDP)</text>
+    <text x="220" y="48" text-anchor="middle" fill="#c9d1d9" font-size="11">✓ SYN → STATE 2-Way Handshake (16-bit Conn ID)</text>
+    <text x="220" y="68" text-anchor="middle" fill="#c9d1d9" font-size="11">✓ Cumulative ACKs &amp; Out-of-Order Packet Assembly</text>
+    <text x="220" y="88" text-anchor="middle" fill="#c9d1d9" font-size="11">✓ Jacobson Adaptive RTO (SRTT + 4×RTTVAR)</text>
+    <text x="220" y="108" text-anchor="middle" fill="#c9d1d9" font-size="11">✓ Window Flow Control &amp; AIMD Congestion Control</text>
+  </g>
+
+  <!-- Right: TCP Fallback -->
+  <g transform="translate(560, 390)" filter="url(#shadow)">
+    <rect width="340" height="120" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <rect width="340" height="120" rx="8" fill="url(#grad-cyan)"/>
+    <text x="170" y="25" text-anchor="middle" fill="#79c0ff" font-size="14" font-weight="600">Secondary: TCP Fallback</text>
+    <text x="170" y="55" text-anchor="middle" fill="#8b949e" font-size="11">Automatic Dial Fallback if μTP Times Out</text>
+    <text x="170" y="78" text-anchor="middle" fill="#8b949e" font-size="11">Standard Kernel TCP Stack Interface</text>
+    <text x="170" y="101" text-anchor="middle" fill="#8b949e" font-size="11">Unified peer_conn Virtual Interface</text>
+  </g>
+
+  <!-- Convergence to BitTorrent Protocol & Scheduler -->
+  <path d="M 320 510 L 320 535 L 500 535 L 500 550" stroke="#58a6ff" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M 680 510 L 680 535 L 500 535 L 500 550" stroke="#58a6ff" stroke-width="2"/>
+
+  <!-- 5. Scheduler & Verification -->
+  <g transform="translate(180, 550)" filter="url(#shadow)">
+    <rect width="640" height="60" rx="8" fill="#161b22" stroke="#238636" stroke-width="1.5"/>
+    <rect width="640" height="60" rx="8" fill="url(#grad-green)"/>
+    <text x="320" y="25" text-anchor="middle" fill="#3fb950" font-size="14" font-weight="600">BitTorrent Protocol &amp; Piece Verification</text>
+    <text x="320" y="45" text-anchor="middle" fill="#8b949e" font-size="11">Rarest-First Min-Heap • Pipelined Block Requests (16 KB) • SHA-1 Checksum Validation</text>
+  </g>
+
+  <!-- Down Arrow to Storage -->
+  <path d="M 500 610 L 500 635" stroke="#3fb950" stroke-width="2" marker-end="url(#arrow-green)"/>
+
+  <!-- 6. Output Storage -->
+  <g transform="translate(350, 635)" filter="url(#shadow)">
+    <rect width="300" height="35" rx="6" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+    <text x="150" y="22" text-anchor="middle" fill="#f0f6fc" font-size="12" font-weight="500">Atomic .part File &amp; Resume State JSON</text>
+  </g>
+</svg>
