@@ -577,7 +577,7 @@ func (t *torrent_file) start_download_worker(
 ) worker_outcome {
 	p := pi.addr
 
-	c, err := new_client(p, t.info_hash, peerID, len(t.piece_hashes))
+	c, err := new_client(p, t.info_hash, peerID, len(t.piece_hashes), transport_tcp)
 	if err != nil {
 		log.Printf("could not connect to peer %s: %v", p, err)
 		return outcome_failed
@@ -742,6 +742,9 @@ func (t *torrent_file) fill_peer_slots(
 }
 
 func (t *torrent_file) download() ([]byte, error) {
+	downloadStart := time.Now()
+	bytesDownloaded := int64(0)
+
 	log.Println("starting download for", t.name)
 	log.Printf("%d trackers: %v", len(t.trackers), t.trackers)
 
@@ -931,6 +934,7 @@ func (t *torrent_file) download() ([]byte, error) {
 			complete[result.index] = true
 			scheduler.set_complete(result.index)
 			donePieces++
+			bytesDownloaded += int64(len(result.data))
 
 			if err := save_resume_state(
 				t,
@@ -958,10 +962,24 @@ func (t *torrent_file) download() ([]byte, error) {
 					float64(len(t.piece_hashes)) *
 					100
 
+			elapsed := time.Since(downloadStart)
+			speed := float64(bytesDownloaded) / elapsed.Seconds()
+
+			remainingBytes := int64(t.length) - bytesDownloaded
+
+			eta := time.Duration(0)
+			if speed > 0 {
+				eta = time.Duration(
+					float64(remainingBytes) / speed * float64(time.Second),
+				)
+			}
+
 			log.Printf(
-				"%.2f%% done — piece %d saved — %d/%d peers active",
+				"%.2f%% done — piece %d saved — %.2f MB/s — ETA %s — %d/%d peers active",
 				percent,
 				result.index,
+				speed/(1024*1024),
+				format_duration(eta),
 				active,
 				known,
 			)
@@ -985,7 +1003,17 @@ func (t *torrent_file) download() ([]byte, error) {
 		}
 	}
 
+	totalElapsed := time.Since(downloadStart)
+	averageSpeed := float64(bytesDownloaded) / totalElapsed.Seconds()
+
 	log.Println("all pieces downloaded successfully")
+
+	log.Printf(
+		"download summary: %.2f MB in %s (average %.2f MB/s)",
+		float64(bytesDownloaded)/(1024*1024),
+		format_duration(totalElapsed),
+		averageSpeed/(1024*1024),
+	)
 
 	log.Printf(
 		"final peer table:\n%s",
@@ -1056,7 +1084,7 @@ func (t *torrent_file) piece_length_at(index int) int {
 // is done or the peer stops being useful, and reports how it went.
 func start_download_worker(pm *peer_manager, pi *peer_info, info_hash [20]byte, peer_id [20]byte, num_pieces int, work_ch chan *piece_work, results_ch chan *piece_result, done <-chan struct{}) worker_outcome {
 	p := pi.addr
-	c, err := new_client(p, info_hash, peer_id, num_pieces)
+	c, err := new_client(p, info_hash, peer_id, num_pieces, transport_tcp)
 	if err != nil {
 		log.Printf("could not connect to peer %s: %v\n", p, err)
 		return outcome_failed

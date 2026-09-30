@@ -9,18 +9,19 @@ import (
 )
 
 type client struct {
-	conn      net.Conn
+	conn      peer_conn
 	peer      peer
 	info_hash [20]byte
 	peer_id   [20]byte
+	transport transport_mode
 	bitfield  bitfield
 	choked    bool
 	rtt       time.Duration // TCP connect time, used as the peer's RTT
 }
 
-func new_client(p peer, info_hash [20]byte, peer_id [20]byte, num_pieces int) (*client, error) {
+func new_client(p peer, info_hash [20]byte, peer_id [20]byte, num_pieces int, mode transport_mode) (*client, error) {
 	start := time.Now()
-	conn, err := net.DialTimeout("tcp", p.String(), 10*time.Second)
+	conn, err := dial_peer(p, mode)
 	if err != nil {
 		return nil, err
 	}
@@ -42,6 +43,7 @@ func new_client(p peer, info_hash [20]byte, peer_id [20]byte, num_pieces int) (*
 		peer:      p,
 		info_hash: info_hash,
 		peer_id:   peer_id,
+		transport: mode,
 		bitfield:  bf,
 		choked:    choked,
 		rtt:       rtt,
