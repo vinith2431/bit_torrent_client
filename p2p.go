@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"container/heap"
 	"crypto/sha1"
 	"encoding/json"
 	"fmt"
@@ -20,6 +21,7 @@ const (
 	table_interval   = 15 * time.Second
 	table_rows       = 10
 )
+const endgame_pieces = 2
 
 type piece_work struct {
 	index  int
@@ -32,19 +34,118 @@ type piece_result struct {
 	data  []byte
 }
 
+type piece_state uint8
+
+const (
+	piece_available piece_state = iota
+	piece_in_progress
+	piece_completed
+)
+
+type piece_priority struct {
+	index        int
+	availability int
+}
+
+type piece_priority_queue struct {
+	items    []piece_priority
+	position []int
+}
+
+func (pq piece_priority_queue) Len() int {
+	return len(pq.items)
+}
+
+func (pq piece_priority_queue) Less(i, j int) bool {
+	if pq.items[i].availability != pq.items[j].availability {
+		return pq.items[i].availability < pq.items[j].availability
+	}
+
+	// If two pieces have the same availability,
+	// use the lower piece index as a deterministic tie-breaker.
+	return pq.items[i].index < pq.items[j].index
+}
+
+func (pq piece_priority_queue) Swap(i, j int) {
+	pq.items[i], pq.items[j] = pq.items[j], pq.items[i]
+
+	pq.position[pq.items[i].index] = i
+	pq.position[pq.items[j].index] = j
+}
+
+func (pq *piece_priority_queue) Push(x any) {
+	item := x.(piece_priority)
+
+	pq.position[item.index] = len(pq.items)
+	pq.items = append(pq.items, item)
+}
+
+func (pq *piece_priority_queue) Pop() any {
+	old := pq.items
+	n := len(old)
+
+	item := old[n-1]
+	pq.items = old[:n-1]
+
+	pq.position[item.index] = -1
+
+	return item
+}
+
+func new_piece_priority_queue(num_pieces int) piece_priority_queue {
+	pq := piece_priority_queue{
+		items:    make([]piece_priority, num_pieces),
+		position: make([]int, num_pieces),
+	}
+
+	for i := 0; i < num_pieces; i++ {
+		pq.items[i] = piece_priority{
+			index:        i,
+			availability: 0,
+		}
+		pq.position[i] = i
+	}
+
+	heap.Init(&pq)
+
+	return pq
+}
+
 type piece_scheduler struct {
-	mu           sync.Mutex
+	mu sync.Mutex
+
 	availability []int
 	complete     []bool
-	active       []bool
+	active       []int
+
+	// Min-heap ordered by piece availability.
+	// The piece with the lowest availability is at the top.
+	queue piece_priority_queue
 }
 
 func new_piece_scheduler(num_pieces int) *piece_scheduler {
 	return &piece_scheduler{
 		availability: make([]int, num_pieces),
 		complete:     make([]bool, num_pieces),
-		active:       make([]bool, num_pieces),
+		active:       make([]int, num_pieces),
+		queue:        new_piece_priority_queue(num_pieces),
 	}
+}
+
+func (ps *piece_scheduler) update_queue(index int) {
+	if index < 0 || index >= len(ps.availability) {
+		return
+	}
+
+	position := ps.queue.position[index]
+
+	if position < 0 || position >= len(ps.queue.items) {
+		return
+	}
+
+	ps.queue.items[position].availability = ps.availability[index]
+
+	heap.Fix(&ps.queue, position)
 }
 
 func (ps *piece_scheduler) add_peer(bf bitfield) {
@@ -54,8 +155,26 @@ func (ps *piece_scheduler) add_peer(bf bitfield) {
 	for i := range ps.availability {
 		if bf.has_piece(i) {
 			ps.availability[i]++
+			ps.update_queue(i)
 		}
 	}
+}
+func (ps *piece_scheduler) add_piece_to_peer(index int) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	if index < 0 || index >= len(ps.availability) {
+		return
+	}
+
+	ps.availability[index]++
+	ps.update_queue(index)
+
+	log.Printf(
+		"scheduler: piece %d availability increased to %d",
+		index,
+		ps.availability[index],
+	)
 }
 
 func (ps *piece_scheduler) remove_peer(bf bitfield) {
@@ -65,6 +184,7 @@ func (ps *piece_scheduler) remove_peer(bf bitfield) {
 	for i := range ps.availability {
 		if bf.has_piece(i) && ps.availability[i] > 0 {
 			ps.availability[i]--
+			ps.update_queue(i)
 		}
 	}
 }
@@ -78,7 +198,7 @@ func (ps *piece_scheduler) set_complete(index int) {
 	}
 
 	ps.complete[index] = true
-	ps.active[index] = false
+	ps.active[index] = 0
 }
 
 func (ps *piece_scheduler) is_complete(index int) bool {
@@ -95,40 +215,63 @@ func (ps *piece_scheduler) is_complete(index int) bool {
 func (ps *piece_scheduler) next(bf bitfield) int {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	endgame := ps.in_endgame_locked()
 
-	best := -1
-	bestAvailability := int(^uint(0) >> 1)
+	/*
+			Some pieces at the top of the global heap may not be
+			available from this particular peer.
 
-	for i := range ps.availability {
-		if ps.complete[i] {
+		Temporarily remove such pieces, search for the best piece
+		this peer actually owns, then put everything back.
+	*/
+	var skipped []piece_priority
+
+	for ps.queue.Len() > 0 {
+		item := heap.Pop(&ps.queue).(piece_priority)
+
+		index := item.index
+
+		// Keep the heap entry's availability synchronized.
+		item.availability = ps.availability[index]
+
+		if ps.complete[index] ||
+			ps.active[index] >= 1 && !endgame ||
+			ps.active[index] >= 2 ||
+			item.availability == 0 ||
+			!bf.has_piece(index) {
+
+			skipped = append(skipped, item)
 			continue
 		}
 
-		if ps.active[i] {
-			continue
+		// This is the rarest eligible piece for this peer.
+		ps.active[index]++
+
+		// Put the temporarily skipped entries back.
+		for _, skippedItem := range skipped {
+			heap.Push(&ps.queue, skippedItem)
 		}
 
-		if !bf.has_piece(i) {
-			continue
-		}
+		// Put the selected piece back as well.
+		// It remains in the queue but is marked active,
+		// so another worker cannot claim it.
+		heap.Push(&ps.queue, item)
 
-		if ps.availability[i] == 0 {
-			continue
-		}
+		log.Printf(
+			"scheduler selected piece %d (availability %d)",
+			index,
+			item.availability,
+		)
 
-		if ps.availability[i] < bestAvailability {
-			best = i
-			bestAvailability = ps.availability[i]
-		}
+		return index
 	}
 
-	if best == -1 {
-		return -1
+	// No eligible piece was found.
+	for _, skippedItem := range skipped {
+		heap.Push(&ps.queue, skippedItem)
 	}
 
-	ps.active[best] = true
-	log.Printf("scheduler selected piece %d (availability %d)", best, bestAvailability)
-	return best
+	return -1
 }
 
 func (ps *piece_scheduler) release(index int) {
@@ -139,9 +282,35 @@ func (ps *piece_scheduler) release(index int) {
 		return
 	}
 
-	if !ps.complete[index] {
-		ps.active[index] = false
+	if !ps.complete[index] && ps.active[index] > 0 {
+		ps.active[index]--
 	}
+}
+
+func (ps *piece_scheduler) in_endgame() bool {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	remaining := 0
+
+	for i := range ps.complete {
+		if !ps.complete[i] {
+			remaining++
+		}
+	}
+
+	return remaining <= endgame_pieces
+}
+func (ps *piece_scheduler) in_endgame_locked() bool {
+	remaining := 0
+
+	for i := range ps.complete {
+		if !ps.complete[i] {
+			remaining++
+		}
+	}
+
+	return remaining <= endgame_pieces
 }
 
 type resume_state struct {
@@ -308,7 +477,7 @@ func (pp *piece_progress) fill_requests(c *client, piece_length int) error {
 	return nil
 }
 
-func (pp *piece_progress) handle_message(c *client) error {
+func (pp *piece_progress) handle_message(c *client, scheduler *piece_scheduler) error {
 	msg, err := c.read()
 	if err != nil {
 		return err
@@ -336,7 +505,17 @@ func (pp *piece_progress) handle_message(c *client) error {
 		if err != nil {
 			return err
 		}
-		c.bitfield.set_piece(index)
+
+		// Only update global availability if this peer
+		// did not already advertise this piece.
+		if !c.bitfield.has_piece(index) {
+			c.bitfield.set_piece(index)
+
+			if scheduler != nil {
+				scheduler.add_piece_to_peer(index)
+			}
+
+		}
 
 	case msg_piece:
 		n, err := parse_piece(pp.index, pp.buf, msg)
@@ -354,7 +533,7 @@ func (pp *piece_progress) handle_message(c *client) error {
 	return nil
 }
 
-func download_piece(c *client, pw *piece_work) ([]byte, error) {
+func download_piece(c *client, pw *piece_work, scheduler *piece_scheduler) ([]byte, error) {
 	pp := &piece_progress{
 		index: pw.index,
 		buf:   make([]byte, pw.length),
@@ -370,7 +549,7 @@ func download_piece(c *client, pw *piece_work) ([]byte, error) {
 			}
 		}
 
-		if err := pp.handle_message(c); err != nil {
+		if err := pp.handle_message(c, scheduler); err != nil {
 			return nil, err
 		}
 	}
@@ -457,7 +636,7 @@ func (t *torrent_file) start_download_worker(
 
 		start := time.Now()
 
-		data, err := download_piece(c, pw)
+		data, err := download_piece(c, pw, scheduler)
 		if err != nil {
 			scheduler.release(index)
 
@@ -501,6 +680,10 @@ func (t *torrent_file) start_download_worker(
 				elapsed,
 				true,
 			)
+
+			// The result has been handed to the main download loop.
+			// Do not immediately claim another piece from this worker.
+			return outcome_done
 
 		case <-done:
 			scheduler.release(index)
@@ -910,7 +1093,7 @@ func start_download_worker(pm *peer_manager, pi *peer_info, info_hash [20]byte, 
 		misses = 0
 
 		start := time.Now()
-		data, err := download_piece(c, pw)
+		data, err := download_piece(c, pw, nil)
 		if err != nil {
 			work_ch <- pw
 			log.Printf("failed to download piece %d from %s: %v\n", pw.index, p, err)
